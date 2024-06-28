@@ -23,6 +23,7 @@ import sys
 import unittest
 import uuid
 import zipfile
+
 from functools import partial
 from io import StringIO
 from pathlib import Path
@@ -71,7 +72,6 @@ from toil.test import (ToilTest,
                        needs_torque,
                        needs_wes_server,
                        slow)
-from toil.test.provisioners.clusterTest import AbstractClusterTest
 
 log = logging.getLogger(__name__)
 CONFORMANCE_TEST_TIMEOUT = 10000
@@ -181,30 +181,46 @@ def run_conformance_tests(
         cmd.extend(["--"] + args_passed_directly_to_runner)
 
         log.info("Running: '%s'", "' '".join(cmd))
+        output_lines: List[str] = []
         try:
-            output = subprocess.check_output(cmd, cwd=workDir, stderr=subprocess.STDOUT)
+            child = subprocess.Popen(cmd, cwd=workDir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+            if child.stdout is not None:
+                for line_bytes in child.stdout:
+                    # Pass through all the logs
+                    line_text = line_bytes.decode('utf-8', errors='replace').rstrip()
+                    output_lines.append(line_text)
+                    log.info(line_text)
+
+            # Once it's done writing, amke sure it succeeded.
+            child.wait()
+            log.info("CWL tests finished with exit code %s", child.returncode)
+            if child.returncode != 0:
+                # Act like check_output and raise an error.
+                raise subprocess.CalledProcessError(child.returncode, ' '.join(cmd))
         finally:
             if job_store_override:
                 # Clean up the job store we used for all the tests, if it is still there.
                 subprocess.run(["toil", "clean", job_store_override])
 
     except subprocess.CalledProcessError as e:
+        log.info("CWL test runner return code was unsuccessful")
         only_unsupported = False
         # check output -- if we failed but only have unsupported features, we're okay
         p = re.compile(
             r"(?P<failures>\d+) failures, (?P<unsupported>\d+) unsupported features"
         )
 
-        error_log = e.output.decode("utf-8")
-        for line in error_log.split("\n"):
-            m = p.search(line)
+        for line_text in output_lines:
+            m = p.search(line_text)
             if m:
                 if int(m.group("failures")) == 0 and int(m.group("unsupported")) > 0:
                     only_unsupported = True
                     break
         if (not only_unsupported) or must_support_all_features:
-            print(error_log)
+            log.error("CWL tests gave unacceptable output:\n%s", '\n'.join(output_lines))
             raise e
+        log.info("Unsuccessful return code is OK")
 
 
 TesterFuncType = Callable[[str, str, "CWLObjectType"], None]
@@ -502,7 +518,7 @@ class CWLWorkflowTest(ToilTest):
             "src/toil/test/cwl/seqtk_seq.cwl",
             "src/toil/test/cwl/seqtk_seq_job.json",
             self._expected_seqtk_output(self.outDir),
-            main_args=["--default-container", "quay.io/biocontainers/seqtk:r93--0"],
+            main_args=["--default-container", "quay.io/biocontainers/seqtk:1.4--he4a0461_1"],
             out_name="output1",
         )
 
@@ -1165,86 +1181,6 @@ class CWLv12Test(ToilTest):
         )
 
 
-@needs_aws_ec2
-@needs_fetchable_appliance
-@slow
-class CWLOnARMTest(AbstractClusterTest):
-    """
-    Run the CWL 1.2 conformance tests on ARM specifically.
-    """
-
-    def __init__(self, methodName: str) -> None:
-        super().__init__(methodName=methodName)
-        self.clusterName = "cwl-test-" + str(uuid.uuid4())
-        self.leaderNodeType = "t4g.2xlarge"
-        self.clusterType = "kubernetes"
-        # We need to be running in a directory which Flatcar and the Toil Appliance both have
-        self.cwl_test_dir = "/tmp/toil/cwlTests"
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.jobStore = f"aws:{self.awsRegion()}:cluster-{uuid.uuid4()}"
-
-    @needs_env_var("CI_COMMIT_SHA", "a git commit sha")
-    def test_cwl_on_arm(self) -> None:
-        # Make a cluster
-        self.launchCluster()
-        # get the leader so we know the IP address - we don't need to wait since create cluster
-        # already ensures the leader is running
-        self.cluster = cluster_factory(
-            provisioner="aws", zone=self.zone, clusterName=self.clusterName
-        )
-        self.leader = self.cluster.getLeader()
-
-        commit = os.environ["CI_COMMIT_SHA"]
-        self.sshUtil(
-            [
-                "bash",
-                "-c",
-                f"mkdir -p {self.cwl_test_dir} && cd {self.cwl_test_dir} && git clone https://github.com/DataBiosphere/toil.git",
-            ]
-        )
-
-        # We use CI_COMMIT_SHA to retrieve the Toil version needed to run the CWL tests
-        self.sshUtil(
-            ["bash", "-c", f"cd {self.cwl_test_dir}/toil && git checkout {commit}"]
-        )
-
-        # --never-download prevents silent upgrades to pip, wheel and setuptools
-        self.sshUtil(
-            [
-                "bash",
-                "-c",
-                f"virtualenv --system-site-packages --never-download {self.venvDir}",
-            ]
-        )
-        self.sshUtil(
-            [
-                "bash",
-                "-c",
-                f". .{self.venvDir}/bin/activate && cd {self.cwl_test_dir}/toil && make prepare && make develop extras=[all]",
-            ]
-        )
-
-        # Runs the CWLv12Test on an ARM instance
-        self.sshUtil(
-            [
-                "bash",
-                "-c",
-                f". .{self.venvDir}/bin/activate && cd {self.cwl_test_dir}/toil && pytest --log-cli-level DEBUG -r s src/toil/test/cwl/cwlTest.py::CWLv12Test::test_run_conformance",
-            ]
-        )
-
-        # We know if it succeeds it should save a junit XML for us to read.
-        # Bring it back to be an artifact.
-        self.rsync_util(
-            f":{self.cwl_test_dir}/toil/conformance-1.2.junit.xml",
-            os.path.join(
-                self._projectRootPath(),
-                "arm-conformance-1.2.junit.xml"
-            )
-        )
-
 @needs_cwl
 @pytest.mark.cwl_small_log_dir
 def test_workflow_echo_string_scatter_stderr_log_dir(tmp_path: Path) -> None:
@@ -1351,7 +1287,9 @@ def test_log_dir_echo_stderr(tmp_path: Path) -> None:
     output = open(result).read()
     assert output == "hello\n"
 
-
+# TODO: It's not clear how this test tests filename conflict resolution; it
+# seems like it runs a python script to copy some files and makes sure the
+# workflow doesn't fail.
 @needs_cwl
 @pytest.mark.cwl_small_log_dir
 def test_filename_conflict_resolution(tmp_path: Path) -> None:
@@ -1373,6 +1311,25 @@ def test_filename_conflict_resolution(tmp_path: Path) -> None:
     stdout, stderr = p.communicate()
     assert b"Finished toil run successfully" in stderr
     assert p.returncode == 0
+
+@needs_cwl
+@pytest.mark.cwl_small_log_dir
+def test_filename_conflict_resolution_3_or_more(tmp_path: Path) -> None:
+    out_dir = tmp_path / "cwl-out-dir"
+    toil = "toil-cwl-runner"
+    options = [
+        f"--outdir={out_dir}",
+        "--clean=always",
+    ]
+    cwl = os.path.join(
+        os.path.dirname(__file__), "scatter_duplicate_outputs.cwl"
+    )
+    cmd = [toil] + options + [cwl]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = p.communicate()
+    assert b"Finished toil run successfully" in stderr
+    assert p.returncode == 0
+    assert len(os.listdir(out_dir)) == 9, "All 9 files made by the scatter should be in the directory"
 
 @needs_cwl
 @needs_docker

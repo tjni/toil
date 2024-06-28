@@ -155,7 +155,7 @@ class NoSuchJobStoreException(LocatorException):
 
 class JobStoreExistsException(LocatorException):
     """Indicates that the specified job store already exists."""
-    def __init__(self, prefix: str, locator: str):
+    def __init__(self, locator: str, prefix: str):
         """
         :param str locator: The location of the job store
         """
@@ -445,6 +445,7 @@ class AbstractJobStore(ABC):
         # subclasses of AbstractJobStore.
         parseResult = urlparse(src_uri)
         otherCls = self._findJobStoreForUrl(parseResult)
+        logger.info("Importing input %s...", src_uri)
         return self._import_file(otherCls,
                                  parseResult,
                                  shared_file_name=shared_file_name,

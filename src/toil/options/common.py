@@ -137,8 +137,14 @@ def make_open_interval_action(min: Union[int, float], max: Optional[Union[int, f
                 func = fC(min, max)
             try:
                 if not func(values):
-                    raise parser.error(
-                        f"{option_string} ({values}) must be within the range: [{min}, {'infinity' if max is None else max})")
+                    if max is None:
+                        raise parser.error(
+                            f"{option_string} ({values}) must be at least {min}"
+                        )
+                    else:
+                        raise parser.error(
+                            f"{option_string} ({values}) must be at least {min} and strictly less than {max})"
+                        )
             except AssertionError:
                 raise RuntimeError(f"The {option_string} option has an invalid value: {values}")
             setattr(namespace, self.dest, values)
@@ -173,7 +179,7 @@ JOBSTORE_HELP = ("The location of the job store for the workflow.  "
                  "store must be accessible by all worker nodes. Depending on the desired "
                  "job store implementation, the location should be formatted according to "
                  "one of the following schemes:\n\n"
-                 "file:<path> where <path> points to a directory on the file systen\n\n"
+                 "file:<path> where <path> points to a directory on the file system\n\n"
                  "aws:<region>:<prefix> where <region> is the name of an AWS region like "
                  "us-west-2 and <prefix> will be prepended to the names of any top-level "
                  "AWS resources in use by job store, e.g. S3 buckets.\n\n "

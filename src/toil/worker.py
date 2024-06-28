@@ -159,6 +159,8 @@ def workerScript(
     if config.colored_logs:
         install_log_color()
 
+    logger.debug("Worker started for job %s...", job_name)
+
     ##########################################
     #Create the worker killer, if requested
     ##########################################
@@ -417,31 +419,33 @@ def workerScript(
                 # Create a fileStore object for the job
                 fileStore = AbstractFileStore.createFileStore(job_store, jobDesc, local_worker_temp_dir, blockFn,
                                                               caching=config.caching)
-                with job._executor(stats=statsDict if config.stats else None,
-                                   fileStore=fileStore):
-                    with deferredFunctionManager.open() as defer:
-                        with fileStore.open(job):
-                            # Get the next block function to wait on committing this job
-                            blockFn = fileStore.waitForCommit
+                try:
+                    with job._executor(stats=statsDict if config.stats else None,
+                                       fileStore=fileStore):
+                        with deferredFunctionManager.open() as defer:
+                            with fileStore.open(job):
+                                # Get the next block function to wait on committing this job
+                                blockFn = fileStore.waitForCommit
 
-                            # Run the job, save new successors, and set up
-                            # locally (but don't commit) successor
-                            # relationships and job completion.
-                            # Pass everything as name=value because Cactus
-                            # likes to override _runner when it shouldn't and
-                            # it needs some hope of finding the arguments it
-                            # wants across multiple Toil versions. We also
-                            # still pass a jobGraph argument to placate old
-                            # versions of Cactus.
-                            job._runner(jobGraph=None, jobStore=job_store, fileStore=fileStore, defer=defer)
+                                # Run the job, save new successors, and set up
+                                # locally (but don't commit) successor
+                                # relationships and job completion.
+                                # Pass everything as name=value because Cactus
+                                # likes to override _runner when it shouldn't and
+                                # it needs some hope of finding the arguments it
+                                # wants across multiple Toil versions. We also
+                                # still pass a jobGraph argument to placate old
+                                # versions of Cactus.
+                                job._runner(jobGraph=None, jobStore=job_store, fileStore=fileStore, defer=defer)
 
-                            # When the executor for the job finishes it will
-                            # kick off a commit with the link to the job body
-                            # cut.
-
-                # Accumulate messages from this job & any subsequent chained jobs
-                statsDict.workers.logs_to_leader += fileStore.logging_messages
-                statsDict.workers.logging_user_streams += fileStore.logging_user_streams
+                                # When the executor for the job finishes it will
+                                # kick off a commit with the link to the job body
+                                # cut.
+                finally:
+                    # Accumulate messages from this job & any subsequent chained jobs.
+                    # Keep the messages even if the job fails.
+                    statsDict.workers.logs_to_leader += fileStore.logging_messages
+                    statsDict.workers.logging_user_streams += fileStore.logging_user_streams
 
                 logger.info("Completed body for %s", jobDesc)
 
@@ -540,7 +544,8 @@ def workerScript(
         # Job wants the worker to stop for debugging
         raise
     except BaseException as e: #Case that something goes wrong in worker, or we are asked to stop
-        logger.critical("Worker crashed with traceback:\n%s", traceback.format_exc())
+        if not isinstance(e, SystemExit):
+            logger.critical("Worker crashed with traceback:\n%s", traceback.format_exc())
         logger.error("Exiting the worker because of a failed job on host %s", socket.gethostname())
         if isinstance(e, CWL_UNSUPPORTED_REQUIREMENT_EXCEPTION):
             # We need to inform the leader that this is a CWL workflow problem
@@ -749,7 +754,6 @@ def in_contexts(contexts: List[str]) -> Iterator[None]:
 def main(argv: Optional[List[str]] = None) -> None:
     if argv is None:
         argv = sys.argv
-
     # Parse our command line
     options = parse_args(argv)
 

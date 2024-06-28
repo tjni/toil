@@ -1,13 +1,12 @@
 dill>=0.3.2, <0.4
-requests>=2, <3
+requests<=2.31.0
 docker>=6.1.0, <8
-# Work around https://github.com/docker/docker-py/issues/3113
 urllib3>=1.26.0,<3
 python-dateutil
-psutil >= 3.0.1, <6
+psutil >= 3.0.1, < 7
 PyPubSub >=4.0.3, <5
 addict>=2.2.1, <2.5
-pytz>=2012
+backports.zoneinfo[tzdata];python_version<"3.9"
 enlighten>=1.5.2, <2
 configargparse>=1.7,<2
 ruamel.yaml>=0.15

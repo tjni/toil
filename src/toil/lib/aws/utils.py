@@ -15,38 +15,45 @@ import errno
 import logging
 import os
 import socket
-from typing import (Any,
-                    Callable,
-                    ContextManager,
-                    Dict,
-                    Iterable,
-                    Iterator,
-                    List,
-                    Optional,
-                    Set,
-                    cast)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    ContextManager,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    cast,
+)
 from urllib.parse import ParseResult
 
-from toil.lib.aws import session, AWSRegionName, AWSServerErrors
+from toil.lib.aws import AWSRegionName, AWSServerErrors, session
 from toil.lib.misc import printq
-from toil.lib.retry import (DEFAULT_DELAYS,
-                            DEFAULT_TIMEOUT,
-                            get_error_code,
-                            get_error_status,
-                            old_retry,
-                            retry)
+from toil.lib.retry import (
+    DEFAULT_DELAYS,
+    DEFAULT_TIMEOUT,
+    ErrorCondition,
+    get_error_code,
+    get_error_status,
+    old_retry,
+    retry,
+)
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3 import S3ServiceResource
+    from mypy_boto3_s3.service_resource import Bucket
+    from mypy_boto3_s3.service_resource import Object as S3Object
+    from mypy_boto3_sdb.type_defs import AttributeTypeDef
 
 try:
-    from boto.exception import BotoServerError, S3ResponseError
-    from botocore.exceptions import ClientError
-    from mypy_boto3_iam import IAMClient, IAMServiceResource
-    from mypy_boto3_s3 import S3Client, S3ServiceResource
-    from mypy_boto3_s3.literals import BucketLocationConstraintType
-    from mypy_boto3_s3.service_resource import Bucket, Object
-    from mypy_boto3_sdb import SimpleDBClient
+    from botocore.exceptions import ClientError, EndpointConnectionError
 except ImportError:
-    BotoServerError = None  # type: ignore
     ClientError = None  # type: ignore
+    EndpointConnectionError = None  # type: ignore
     # AWS/boto extra is not installed
 
 logger = logging.getLogger(__name__)
@@ -74,7 +81,6 @@ THROTTLED_ERROR_CODES = [
 def delete_iam_role(
     role_name: str, region: Optional[str] = None, quiet: bool = True
 ) -> None:
-
     # TODO: the Boto3 type hints are a bit oversealous here; they want hundreds
     # of overloads of the client-getting methods to exist based on the literal
     # string passed in, to return exactly the right kind of client or resource.
@@ -131,16 +137,24 @@ def connection_reset(e: Exception) -> bool:
     # errno is listed as 104. To be safe, we check for both:
     return isinstance(e, socket.error) and e.errno in (errno.ECONNRESET, 104)
 
+def connection_error(e: Exception) -> bool:
+    """
+    Return True if an error represents a failure to make a network connection.
+    """
+    return (connection_reset(e)
+            or isinstance(e, EndpointConnectionError))
+
+
 # TODO: Replace with: @retry and ErrorCondition
 def retryable_s3_errors(e: Exception) -> bool:
     """
     Return true if this is an error from S3 that looks like we ought to retry our request.
     """
-    return (connection_reset(e)
-            or (isinstance(e, BotoServerError) and e.status in (429, 500))
-            or (isinstance(e, BotoServerError) and e.code in THROTTLED_ERROR_CODES)
+    return (connection_error(e)
+            or (isinstance(e, ClientError) and get_error_status(e) in (429, 500))
+            or (isinstance(e, ClientError) and get_error_code(e) in THROTTLED_ERROR_CODES)
             # boto3 errors
-            or (isinstance(e, (S3ResponseError, ClientError)) and get_error_code(e) in THROTTLED_ERROR_CODES)
+            or (isinstance(e, ClientError) and get_error_code(e) in THROTTLED_ERROR_CODES)
             or (isinstance(e, ClientError) and 'BucketNotEmpty' in str(e))
             or (isinstance(e, ClientError) and e.response.get('ResponseMetadata', {}).get('HTTPStatusCode') == 409 and 'try again' in str(e))
             or (isinstance(e, ClientError) and e.response.get('ResponseMetadata', {}).get('HTTPStatusCode') in (404, 429, 500, 502, 503, 504)))
@@ -195,7 +209,7 @@ def create_s3_bucket(
 
     *ALL* S3 bucket creation should use this function.
     """
-    logger.debug("Creating bucket '%s' in region %s.", bucket_name, region)
+    logger.info("Creating bucket '%s' in region %s.", bucket_name, region)
     if region == "us-east-1":  # see https://github.com/boto/boto3/issues/125
         bucket = s3_resource.create_bucket(Bucket=bucket_name)
     else:
@@ -241,10 +255,17 @@ def enable_public_objects(bucket_name: str) -> None:
     # Stop using an ownership controls setting that prohibits ACLs.
     s3_client.delete_bucket_ownership_controls(Bucket=bucket_name)
 
+class NoBucketLocationError(Exception):
+    """
+    Error to represent that we could not get a location for a bucket.
+    """
+    pass
 
 def get_bucket_region(bucket_name: str, endpoint_url: Optional[str] = None, only_strategies: Optional[Set[int]] = None) -> str:
     """
-    Get the AWS region name associated with the given S3 bucket.
+    Get the AWS region name associated with the given S3 bucket, or raise NoBucketLocationError.
+
+    Does not log at info level or above when this does not work; failures are expected in some contexts.
 
     Takes an optional S3 API URL override.
 
@@ -298,6 +319,7 @@ def get_bucket_region(bucket_name: str, endpoint_url: Optional[str] = None, only
         strategies.append(attempt_get_bucket_location_from_us_east_1)
     strategies.append(attempt_head_bucket)
 
+    error_logs: List[Tuple[int, str]] = []
     for attempt in retry_s3():
         with attempt:
             for i, strategy in enumerate(strategies):
@@ -305,10 +327,13 @@ def get_bucket_region(bucket_name: str, endpoint_url: Optional[str] = None, only
                     # We want to test running without this strategy.
                     continue
                 try:
-                    return bucket_location_to_region(strategy())
+                    location = bucket_location_to_region(strategy())
+                    logger.debug('Got bucket location from strategy %d', i + 1)
+                    return location
                 except ClientError as e:
                     if get_error_code(e) == 'AccessDenied' and not endpoint_url:
-                        logger.warning('Strategy %d to get bucket location did not work: %s', i + 1, e)
+                        logger.debug('Strategy %d to get bucket location did not work: %s', i + 1, e)
+                        error_logs.append((i + 1, str(e)))
                         last_error: Exception = e
                         # We were blocked with this strategy. Move on to the
                         # next strategy which might work.
@@ -317,10 +342,15 @@ def get_bucket_region(bucket_name: str, endpoint_url: Optional[str] = None, only
                         raise
                 except KeyError as e:
                     # If we get a weird head response we will have a KeyError
-                    logger.warning('Strategy %d to get bucket location did not work: %s', i + 1, e)
+                    logger.debug('Strategy %d to get bucket location did not work: %s', i + 1, e)
+                    error_logs.append((i + 1, str(e)))
                     last_error = e
-    # If we get here we ran out of attempts. Raise whatever the last problem was.
-    raise last_error
+
+    error_messages = []
+    for rank, message in error_logs:
+        error_messages.append(f"Strategy {rank} failed to get bucket location because: {message}")
+    # If we get here we ran out of attempts.
+    raise NoBucketLocationError("Could not get bucket location: " + "\n".join(error_messages)) from last_error
 
 def region_to_bucket_location(region: str) -> str:
     return '' if region == 'us-east-1' else region
@@ -328,7 +358,8 @@ def region_to_bucket_location(region: str) -> str:
 def bucket_location_to_region(location: Optional[str]) -> str:
     return "us-east-1" if location == "" or location is None else location
 
-def get_object_for_url(url: ParseResult, existing: Optional[bool] = None) -> "Object":
+
+def get_object_for_url(url: ParseResult, existing: Optional[bool] = None) -> "S3Object":
         """
         Extracts a key (object) from a given parsed s3:// URL.
 
@@ -359,9 +390,11 @@ def get_object_for_url(url: ParseResult, existing: Optional[bool] = None) -> "Ob
             # Get the bucket's region to avoid a redirect per request
             region = get_bucket_region(bucket_name, endpoint_url=endpoint_url)
             s3 = session.resource('s3', region_name=region, endpoint_url=endpoint_url)
-        except ClientError:
+        except NoBucketLocationError as e:
             # Probably don't have permission.
             # TODO: check if it is that
+            logger.debug("Couldn't get bucket location: %s", e)
+            logger.debug("Fall back to not specifying location")
             s3 = session.resource('s3', endpoint_url=endpoint_url)
 
         obj = s3.Object(bucket_name, key_name)
@@ -434,3 +467,42 @@ def flatten_tags(tags: Dict[str, str]) -> List[Dict[str, str]]:
     Convert tags from a key to value dict into a list of 'Key': xxx, 'Value': xxx dicts.
     """
     return [{'Key': k, 'Value': v} for k, v in tags.items()]
+
+
+def boto3_pager(requestor_callable: Callable[..., Any], result_attribute_name: str,
+                **kwargs: Any) -> Iterable[Any]:
+    """
+    Yield all the results from calling the given Boto 3 method with the
+    given keyword arguments, paging through the results using the Marker or
+    NextToken, and fetching out and looping over the list in the response
+    with the given attribute name.
+    """
+
+    # Recover the Boto3 client, and the name of the operation
+    client = requestor_callable.__self__  # type: ignore[attr-defined]
+    op_name = requestor_callable.__name__
+
+    # grab a Boto 3 built-in paginator. See
+    # <https://boto3.amazonaws.com/v1/documentation/api/latest/guide/paginators.html>
+    paginator = client.get_paginator(op_name)
+
+    for page in paginator.paginate(**kwargs):
+        # Invoke it and go through the pages, yielding from them
+        yield from page.get(result_attribute_name, [])
+
+
+def get_item_from_attributes(attributes: List["AttributeTypeDef"], name: str) -> Any:
+    """
+    Given a list of attributes, find the attribute associated with the name and return its corresponding value.
+
+    The `attribute_list` will be a list of TypedDict's (which boto3 SDB functions commonly return),
+    where each TypedDict has a "Name" and "Value" key value pair.
+    This function grabs the value out of the associated TypedDict.
+
+    If the attribute with the name does not exist, the function will return None.
+
+    :param attributes: list of attributes
+    :param name: name of the attribute
+    :return: value of the attribute
+    """
+    return next((attribute["Value"] for attribute in attributes if attribute["Name"] == name), None)

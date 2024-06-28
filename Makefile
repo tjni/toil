@@ -105,6 +105,18 @@ marker=""
 # Number of tests to run in parallel.
 threads:="auto"
 
+# Only pass the threading options if running parallel tests. Otherwise we lose
+# live logging. See <https://stackoverflow.com/q/62533239>
+ifeq "$(threads)" "auto"
+	threadopts=-n $(threads) --dist loadscope
+else
+ifeq "$(threads)" "1"
+	threadopts=
+else
+	threadopts=-n $(threads) --dist loadscope
+endif
+endif
+
 develop: check_venv
 	pip install -e .$(extras) $(packages)
 
@@ -135,11 +147,11 @@ clean_sdist:
 # Setting SET_OWNER_TAG will tag cloud resources so that UCSC's cloud murder bot won't kill them.
 test: check_venv check_build_reqs
 	TOIL_OWNER_TAG="shared" \
-	    python -m pytest --durations=0 --strict-markers --log-level DEBUG --log-cli-level INFO -r s $(cov) -n $(threads) --dist loadscope $(tests) -m "$(marker)"
+	    python -m pytest --log-format="%(asctime)s %(levelname)s %(message)s" --durations=0 --strict-markers --log-level DEBUG -o log_cli=true --log-cli-level INFO -r s $(cov) $(threadopts) $(tests) -m "$(marker)" --color=yes
 
 test_debug: check_venv check_build_reqs
 	TOIL_OWNER_TAG="$(whoami)" \
-	    python -m pytest --durations=0 --strict-markers --log-level DEBUG -s -o log_cli=true --log-cli-level DEBUG -r s $(tests) -m "$(marker)" --tb=native --maxfail=1
+	    python -m pytest --log-format="%(asctime)s %(levelname)s %(message)s" --durations=0 --strict-markers --log-level DEBUG -s -o log_cli=true --log-cli-level DEBUG -r s $(tests) -m "$(marker)" --tb=native --maxfail=1 --color=yes
 
 
 # This target will skip building docker and all docker based tests
@@ -148,12 +160,12 @@ test_offline: check_venv check_build_reqs
 	@printf "$(cyan)All docker related tests will be skipped.$(normal)\n"
 	TOIL_SKIP_DOCKER=True \
 	TOIL_SKIP_ONLINE=True \
-	    python -m pytest -vv --timeout=600 --strict-markers --log-level DEBUG --log-cli-level INFO $(cov) -n $(threads) --dist loadscope $(tests) -m "$(marker)"
+	    python -m pytest --log-format="%(asctime)s %(levelname)s %(message)s" -vv --timeout=600 --strict-markers --log-level DEBUG --log-cli-level INFO $(cov) -n $(threads) --dist loadscope $(tests) -m "$(marker)" --color=yes
 
 # This target will run about 1 minute of tests, and stop at the first failure
 test_1min: check_venv check_build_reqs
 	TOIL_SKIP_DOCKER=True \
-	    python -m pytest -vv --timeout=10 --strict-markers --log-level DEBUG --log-cli-level INFO --maxfail=1 src/toil/test/batchSystems/batchSystemTest.py::SingleMachineBatchSystemTest::test_run_jobs src/toil/test/batchSystems/batchSystemTest.py::KubernetesBatchSystemBenchTest src/toil/test/server/serverTest.py::ToilWESServerBenchTest::test_get_service_info src/toil/test/cwl/cwlTest.py::CWLWorkflowTest::test_run_colon_output src/toil/test/jobStores/jobStoreTest.py::FileJobStoreTest::testUpdateBehavior -m "$(marker)"
+	    python -m pytest --log-format="%(asctime)s %(levelname)s %(message)s" -vv --timeout=10 --strict-markers --log-level DEBUG --log-cli-level INFO --maxfail=1 src/toil/test/batchSystems/batchSystemTest.py::SingleMachineBatchSystemTest::test_run_jobs src/toil/test/batchSystems/batchSystemTest.py::KubernetesBatchSystemBenchTest src/toil/test/server/serverTest.py::ToilWESServerBenchTest::test_get_service_info src/toil/test/cwl/cwlTest.py::CWLWorkflowTest::test_run_colon_output src/toil/test/jobStores/jobStoreTest.py::FileJobStoreTest::testUpdateBehavior -m "$(marker)" --color=yes
 
 ifdef TOIL_DOCKER_REGISTRY
 
@@ -325,8 +337,8 @@ diff_pydocstyle_report: pydocstyle_report.txt
 	diff-quality --compare-branch=master --violations=pycodestyle --fail-under=100 $^
 
 diff_mypy:
-	mypy --cobertura-xml-report . src/toil || true
-	diff-cover --fail-under=100 cobertura.xml
+	mypy --cobertura-xml-report . src/toil > /dev/null || true
+	diff-cover --fail-under=100 --compare-branch origin/master cobertura.xml
 
 pyupgrade: $(PYSOURCES)
 	pyupgrade --exit-zero-even-if-changed --py37-plus $^
