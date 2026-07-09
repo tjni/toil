@@ -51,7 +51,7 @@ from toil.fileStores import FileID
 from toil.fileStores.abstractFileStore import AbstractFileStore
 from toil.job import WorkerImportJob
 from toil.lib.threading import cpu_count
-from toil.test import get_data
+from toil.test import get_data, get_cwltool_data
 from toil.test import pneeds_aws_s3 as needs_aws_s3
 from toil.test import pneeds_cwl as needs_cwl
 from toil.test import pneeds_docker as needs_docker
@@ -566,6 +566,175 @@ class TestCWLWorkflow:
         with get_data("test/cwl/not_run_required_input.cwl") as cwl_file:
             with get_data("test/cwl/empty.json") as inputs_file:
                 self._tester(cwl_file, inputs_file, {}, tmp_path)
+    
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_single_variable(self, tmp_path: Path) -> None:
+        """cwltool:Loop with one rebound input runs to completion (outputMethod=last)."""
+        with get_cwltool_data("loop-ext/single-var-loop.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/single-var-loop-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": 10}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_iteration_limit_exceeded(self, tmp_path: Path) -> None:
+        """--cwl-loop-iteration-limit aborts runaway loops."""
+        from toil.cwl import cwltoil
+        with get_cwltool_data("loop-ext/single-var-loop.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/single-var-loop-job.yml") as job_file:
+                rc = cwltoil.main(
+                    [
+                        "--enable-ext",
+                        "--cwl-loop-iteration-limit=3",
+                        f"--outdir={tmp_path}",
+                        str(cwl_file),
+                        str(job_file),
+                    ]
+                )
+        assert rc != 0
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_single_variable_no_iteration(self, tmp_path: Path) -> None:
+        """cwltool:Loop with loopWhen=false on entry skips the step and yields null."""
+        with get_cwltool_data("loop-ext/single-var-loop-no-iteration.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/single-var-loop-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": None}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_two_variables(self, tmp_path: Path) -> None:
+        """cwltool:Loop with two rebound inputs runs to completion (outputMethod=last)."""
+        with get_cwltool_data("loop-ext/two-vars-loop.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/two-vars-loop-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": 10}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_all_output_method_no_iteration(self, tmp_path: Path) -> None:
+        """cwltool:Loop with outputMethod=all and loopWhen=false on entry yields empty array."""
+        with get_cwltool_data("loop-ext/all-output-loop-no-iteration.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/single-var-loop-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": []}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_with_all_output_method(self, tmp_path: Path) -> None:
+        """cwltool:Loop with outputMethod=all accumulates each iteration's outputs into an array."""
+        with get_cwltool_data("loop-ext/all-output-loop.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/single-var-loop-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": [2, 3, 4, 5, 6, 7, 8, 9, 10]}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_value_from(self, tmp_path: Path) -> None:
+        """cwltool:Loop with a LoopInput valueFrom expression: next input derived from previous joborder."""
+        with get_cwltool_data("loop-ext/value-from-loop.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/two-vars-loop-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": 10}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_default_value_loop(self, tmp_path: Path) -> None:
+        """cwltool:Loop with a LoopInput default: fallback used when loopSource resolves to None."""
+        with get_cwltool_data("loop-ext/default-value-loop.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/single-var-loop-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": [8, 11, 14, 17, 20]}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_multi_source_loop_input(self, tmp_path: Path) -> None:
+        """cwltool:Loop with multi-source loopSource and pickValue."""
+        with get_cwltool_data("loop-ext/multi-source-loop.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/single-var-loop-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": [2, 3, 4, 5, 8, 11, 14, 17, 20]}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_nested_loops(self, tmp_path: Path) -> None:
+        """cwltool:Loop nested inside another cwltool:Loop, inner uses outputMethod=last, outer uses outputMethod=all."""
+        with get_cwltool_data("loop-ext/loop-inside-loop.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/two-vars-loop-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": [2, 3, 4]}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_nested_loops_all(self, tmp_path: Path) -> None:
+        """cwltool:Loop nested inside another cwltool:Loop, both outputMethod=all."""
+        with get_cwltool_data("loop-ext/loop-inside-loop-all.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/two-vars-loop-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": [[2], [2, 3], [2, 3, 4]]}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_inside_scatter(self, tmp_path: Path) -> None:
+        """Scatter over a Workflow step whose embedded workflow contains a cwltool:Loop step."""
+        with get_cwltool_data("loop-ext/loop-inside-scatter.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/loop-inside-scatter-job.yml") as job_file:
+                self._tester(cwl_file, job_file, {"o1": [10, 10, 10, 10, 10]}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_validate_fail_scatter(self, tmp_path: Path) -> None:
+        """cwltool:Loop combined with scatter on the same step is rejected at validation time."""
+        with get_cwltool_data("loop-ext/invalid-loop-scatter.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/two-vars-loop-job.yml") as job_file:
+                with pytest.raises(ValidationException):
+                    self._tester(cwl_file, job_file, {}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_validate_fail_when(self, tmp_path: Path) -> None:
+        """cwltool:Loop combined with when on the same step is rejected at validation time."""
+        with get_cwltool_data("loop-ext/invalid-loop-when.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/two-vars-loop-job.yml") as job_file:
+                with pytest.raises(ValidationException):
+                    self._tester(cwl_file, job_file, {}, tmp_path, main_args=["--enable-ext"])
+
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_fail_non_boolean_loop_when(self, tmp_path: Path) -> None:
+        """A loopWhen expression that evaluates to a non-boolean fails at runtime."""
+        from toil.cwl import cwltoil
+        from io import StringIO 
+        with get_cwltool_data("loop-ext/invalid-non-boolean-loopWhen.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/two-vars-loop-job.yml") as job_file:
+                rc = cwltoil.main(
+                    ["--enable-ext", f"--outdir={tmp_path}", str(cwl_file), str(job_file)],
+                    stdout=StringIO(),
+                )
+        assert rc != 0
+
+    # This test fails due to AssertionError, needs more looking into it. It is disabled for now.
+    @needs_cwl
+    @pytest.mark.cwl
+    @pytest.mark.cwl_small
+    def test_loop_value_from_fail_no_requirement(self, tmp_path: Path) -> None:
+        """cwltool:Loop with valueFrom but no StepInputExpressionRequirement is rejected."""
+        from toil.cwl import cwltoil
+        from io import StringIO
+        with get_cwltool_data("loop-ext/invalid-value-from-loop-no-requirement.cwl") as cwl_file:
+            with get_cwltool_data("loop-ext/two-vars-loop-job.yml") as job_file:
+                rc = cwltoil.main(
+                    ["--enable-ext", f"--outdir={tmp_path}", str(cwl_file), str(job_file)],
+                    stdout=StringIO(),
+                )
+        assert rc != 0
 
     @needs_slurm
     @pytest.mark.slurm
